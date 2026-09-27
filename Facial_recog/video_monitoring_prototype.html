@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Video Monitoring Prototype — Struggle Signals</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161923;
+    --panel-2: #1c202c;
+    --border: #2a2f3d;
+    --text: #e6e8ee;
+    --text-dim: #8b90a3;
+    --accent: #5db3ff;
+    --good: #4fd18b;
+    --warn: #f2b84b;
+    --bad: #f2665e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+  header p { font-size: 13px; color: var(--text-dim); margin: 0; }
+  main {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: var(--border);
+    overflow: hidden;
+  }
+  .video-pane, .signal-pane {
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .pane-head {
+    padding: 10px 16px;
+    font-size: 12px;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+  }
+  .video-wrap {
+    position: relative;
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #000;
+  }
+  video, canvas {
+    position: absolute;
+    max-width: 100%;
+    max-height: 100%;
+    transform: scaleX(-1);
+  }
+  .start-btn {
+    background: var(--accent);
+    color: #08131f;
+    border: none;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 10px 18px;
+    border-radius: 6px;
+    cursor: pointer;
+    z-index: 5;
+  }
+  .signal-pane { padding: 16px 20px; gap: 16px; overflow-y: auto; }
+  .metric-row {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+  }
+  .metric {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .metric .val { font-size: 20px; font-weight: 600; }
+  .metric .lbl { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+  .metric.good .val { color: var(--good); }
+  .metric.warn .val { color: var(--warn); }
+  .metric.bad .val { color: var(--bad); }
+  .section-title { font-size: 12px; color: var(--text-dim); margin: 4px 0 -4px; }
+  .json-out {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-family: "SF Mono", monospace;
+    font-size: 11.5px;
+    color: var(--text-dim);
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .note {
+    font-size: 12px;
+    color: var(--text-dim);
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Video monitoring prototype — struggle signals</h1>
+  <p>Click start, allow camera access, then look around / blink / stay still to see each signal update. Everything runs locally in your browser — no frames leave this page.</p>
+</header>
+
+<main>
+  <div class="video-pane">
+    <div class="pane-head">Camera feed (mirrored)</div>
+    <div class="video-wrap">
+      <button class="start-btn" id="startBtn">Start camera</button>
+      <video id="video" autoplay playsinline style="display:none"></video>
+      <canvas id="overlay"></canvas>
+    </div>
+  </div>
+
+  <div class="signal-pane">
+    <div class="section-title">Live signals</div>
+    <div class="metric-row">
+      <div class="metric"><div class="val" id="mFace">—</div><div class="lbl">face detected</div></div>
+      <div class="metric"><div class="val" id="mGaze">—</div><div class="lbl">on screen</div></div>
+      <div class="metric"><div class="val" id="mBlink">0</div><div class="lbl">blinks / min</div></div>
+      <div class="metric"><div class="val" id="mEAR">—</div><div class="lbl">eye openness</div></div>
+      <div class="metric"><div class="val" id="mFix">0s</div><div class="lbl">fixation duration</div></div>
+      <div class="metric"><div class="val" id="mBrow">—</div><div class="lbl">brow furrow score</div></div>
+    </div>
+
+    <div class="section-title">Output contract (what would ship to backend)</div>
+    <div class="json-out" id="jsonOut">{ waiting for camera… }</div>
+
+    <div class="note">
+      These numbers are the signal contract your teammate's editor-side code will later combine with cursor/keystroke/error signals into one stuck-confidence score — same role as the metrics from the editor prototype, just sourced from the camera. Thresholds here (blink rate, head-angle range, furrow score) are starting points — tune them once you see real values from a few test users.
+    </div>
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script>
+const video = document.getElementById("video");
+const canvas = document.getElementById("overlay");
+const ctx = canvas.getContext("2d");
+const startBtn = document.getElementById("startBtn");
+
+// --- landmark index sets (MediaPipe Face Mesh, refineLandmarks: true) ---
+const LEFT_EYE  = [33, 160, 158, 133, 153, 144];
+const RIGHT_EYE = [362, 385, 387, 263, 373, 380];
+const LEFT_BROW_INNER = 55;
+const RIGHT_BROW_INNER = 285;
+const NOSE_TIP = 1;
+const LEFT_EYE_OUTER = 33;
+const RIGHT_EYE_OUTER = 263;
+const CHIN = 152;
+const FOREHEAD = 10;
+
+let blinkTimestamps = [];
+let eyesClosed = false;
+let fixationStart = null;
+let lastYaw = null, lastPitch = null;
+const FIXATION_ANGLE_THRESHOLD = 0.03; // normalized units, tune per testing
+const EAR_BLINK_THRESHOLD = 0.20;
+
+function dist(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function computeEAR(pts, lm) {
+  const [p1, p2, p3, p4, p5, p6] = pts.map(i => lm[i]);
+  return (dist(p2, p6) + dist(p3, p5)) / (2 * dist(p1, p4));
+}
+
+function setMetric(id, text, cls) {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.parentElement.className = "metric" + (cls ? " " + cls : "");
+}
+
+function onResults(results) {
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const faces = results.multiFaceLandmarks;
+  if (!faces || faces.length === 0) {
+    setMetric("mFace", "no", "bad");
+    setMetric("mGaze", "—");
+    document.getElementById("jsonOut").textContent = JSON.stringify(
+      { timestamp: Date.now(), faceDetected: false }, null, 2
+    );
+    return;
+  }
+  setMetric("mFace", "yes", "good");
+  const lm = faces[0];
+
+  // draw landmarks lightly for visual confirmation
+  ctx.fillStyle = "#5db3ff";
+  for (const p of lm) {
+    ctx.fillRect(p.x * canvas.width, p.y * canvas.height, 1.2, 1.2);
+  }
+
+  // --- blink / eye openness ---
+  const earL = computeEAR(LEFT_EYE, lm);
+  const earR = computeEAR(RIGHT_EYE, lm);
+  const ear = (earL + earR) / 2;
+  setMetric("mEAR", ear.toFixed(2), ear < EAR_BLINK_THRESHOLD ? "warn" : "good");
+
+  if (ear < EAR_BLINK_THRESHOLD && !eyesClosed) {
+    eyesClosed = true;
+  } else if (ear >= EAR_BLINK_THRESHOLD && eyesClosed) {
+    eyesClosed = false;
+    blinkTimestamps.push(Date.now());
+  }
+  const now = Date.now();
+  blinkTimestamps = blinkTimestamps.filter(t => now - t < 60000);
+  const blinkRate = blinkTimestamps.length;
+  setMetric("mBlink", blinkRate, (blinkRate > 30 || blinkRate < 5) ? "warn" : "good");
+
+  // --- head yaw / pitch proxy (normalized, not true degrees) ---
+  const eyeMidX = (lm[LEFT_EYE_OUTER].x + lm[RIGHT_EYE_OUTER].x) / 2;
+  const eyeDist = dist(lm[LEFT_EYE_OUTER], lm[RIGHT_EYE_OUTER]);
+  const yaw = (lm[NOSE_TIP].x - eyeMidX) / eyeDist;
+
+  const vertMidY = (lm[FOREHEAD].y + lm[CHIN].y) / 2;
+  const vertSpan = dist(lm[FOREHEAD], lm[CHIN]);
+  const pitch = (lm[NOSE_TIP].y - vertMidY) / vertSpan;
+
+  const onScreen = Math.abs(yaw) < 0.18 && Math.abs(pitch) < 0.15;
+  setMetric("mGaze", onScreen ? "yes" : "no", onScreen ? "good" : "warn");
+
+  // --- fixation duration: head angle stable within threshold ---
+  if (lastYaw !== null) {
+    const moved = Math.abs(yaw - lastYaw) > FIXATION_ANGLE_THRESHOLD ||
+                  Math.abs(pitch - lastPitch) > FIXATION_ANGLE_THRESHOLD;
+    if (moved || fixationStart === null) {
+      fixationStart = now;
+    }
+  } else {
+    fixationStart = now;
+  }
+  lastYaw = yaw; lastPitch = pitch;
+  const fixationSeconds = Math.round((now - fixationStart) / 1000);
+  setMetric("mFix", fixationSeconds + "s", fixationSeconds > 20 ? "warn" : "good");
+
+  // --- brow furrow proxy: inner-brow distance normalized by eye distance ---
+  const browDist = dist(lm[LEFT_BROW_INNER], lm[RIGHT_BROW_INNER]) / eyeDist;
+  // lower browDist ~ brows drawn together ~ furrow. Typical relaxed ~0.9-1.1, tune with real faces.
+  const furrowScore = Math.max(0, Math.min(1, 1 - (browDist - 0.7) / 0.5));
+  setMetric("mBrow", furrowScore.toFixed(2), furrowScore > 0.6 ? "warn" : "good");
+
+  document.getElementById("jsonOut").textContent = JSON.stringify({
+    timestamp: now,
+    faceDetected: true,
+    gazeOnScreen: onScreen,
+    blinkRate,
+    eyeOpenness: Number(ear.toFixed(2)),
+    fixationSeconds,
+    browFurrowScore: Number(furrowScore.toFixed(2)),
+  }, null, 2);
+}
+
+startBtn.addEventListener("click", async () => {
+  startBtn.style.display = "none";
+  video.style.display = "block";
+
+  const faceMesh = new FaceMesh({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`,
+  });
+  faceMesh.setOptions({
+    maxNumFaces: 1,
+    refineLandmarks: true,
+    minDetectionConfidence: 0.5,
+    minTrackingConfidence: 0.5,
+  });
+  faceMesh.onResults(onResults);
+
+  const camera = new Camera(video, {
+    onFrame: async () => { await faceMesh.send({ image: video }); },
+    width: 640,
+    height: 480,
+  });
+  camera.start();
+});
+</script>
+</body>
+</html>
