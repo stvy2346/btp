@@ -1,0 +1,15 @@
+{
+  "name": "cpp-sandbox-api",
+  "version": "1.0.0",
+  "description": "Minimal synchronous REST API for compiling and running untrusted C++ in ephemeral, hardened Docker containers.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^5.2.1"
+  }
+}

@@ -28,6 +28,23 @@ const LANGUAGE_CONFIG = {
   java: { name: "Java (OpenJDK 17)", monacoLang: "java" },
 };
 
+// TODO: move to an env var (e.g. import.meta.env.VITE_API_BASE) in a real build
+const API_BASE = "http://localhost:4000";
+
+// Shared verdict -> visual treatment. Anything other than "Accepted" renders
+// as a red/rose failure state instead of the old always-green mock state.
+function getVerdictStyle(status) {
+  const isAccepted = status === "Accepted";
+  return {
+    isAccepted,
+    Icon: isAccepted ? CheckCircle2 : XCircle,
+    badgeClasses: isAccepted
+      ? "text-emerald-400 bg-emerald-500/10 border-emerald-500/20"
+      : "text-rose-400 bg-rose-500/10 border-rose-500/20",
+    textClass: isAccepted ? "text-emerald-400" : "text-rose-400",
+  };
+}
+
 export default function QuestionPage() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -47,7 +64,7 @@ export default function QuestionPage() {
   const [customInput, setCustomInput] = useState("");
   const [activeBottomView, setActiveBottomView] = useState("testcases"); // testcases | result
 
-  // Execution states (Run & Submit mock simulation)
+  // Execution states (Run & Submit against the real judge API)
   const [isRunning, setIsRunning] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [runResult, setRunResult] = useState(null);
@@ -82,53 +99,71 @@ export default function QuestionPage() {
     }
   };
 
-  // Run code against active testcase (Mock)
-  const handleRunCode = () => {
+  // Run code against a single testcase via the judge API
+  const handleRunCode = async () => {
     setIsRunning(true);
     setActiveBottomView("result");
     setRunResult(null);
-
-    // Simulated evaluation delay
-    setTimeout(() => {
-      setIsRunning(false);
-      const currentCase = problem.defaultTestCases[testcaseTab] || {
-        input: customInput || "Custom Input",
-        expected: "Custom Output"
-      };
-
-      setRunResult({
-        status: "Accepted",
-        caseNum: testcaseTab + 1,
-        input: testcaseTab === "custom" ? customInput : currentCase.input,
-        expectedOutput: testcaseTab === "custom" ? "Custom verification" : currentCase.expected,
-        actualOutput: testcaseTab === "custom" ? "Custom output generated" : currentCase.expected,
-        runtime: "12 ms",
-        memory: "16.4 MB",
-        stdout: "Running testcase with mock runner...",
-      });
-    }, 1100);
-  };
-
-  // Submit code for full evaluation (Mock)
-  const handleSubmitCode = () => {
-    setIsSubmitting(true);
-    setActiveBottomView("result");
     setSubmitResult(null);
 
-    // Simulated judge delay
-    setTimeout(() => {
-      setIsSubmitting(false);
-      setSubmitResult({
-        status: "Accepted",
-        totalPassed: problem.defaultTestCases.length + 15,
-        totalCases: problem.defaultTestCases.length + 15,
-        runtime: "48 ms",
-        runtimePercentile: "87.4%",
-        memory: "18.2 MB",
-        memoryPercentile: "92.1%",
-        timestamp: new Date().toLocaleTimeString(),
+    const body =
+      testcaseTab === "custom"
+        ? { language: selectedLanguage, code, customInput: customInput }
+        : { language: selectedLanguage, code, testCaseIndex: testcaseTab };
+
+    try {
+      const res = await fetch(`${API_BASE}/api/problems/${problem.id}/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
       });
-    }, 1500);
+      const data = await res.json();
+      setRunResult({
+        status: data.verdict,
+        caseNum: data.caseNum,
+        input: data.input,
+        expectedOutput: data.expectedOutput,
+        actualOutput: data.actualOutput ?? data.message,
+        runtime: data.run ? `${data.run.timeMs} ms` : "—",
+        memory: "—", // the judge enforces a memory cap but doesn't report usage
+        stdout: data.run?.stdout ?? "",
+        stderr: data.run?.stderr || data.compile?.stderr || "",
+      });
+    } catch (err) {
+      setRunResult({ status: "Internal Error", actualOutput: String(err) });
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
+  // Submit code for full evaluation via the judge API
+  const handleSubmitCode = async () => {
+    setIsSubmitting(true);
+    setActiveBottomView("result");
+    setRunResult(null);
+    setSubmitResult(null);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/problems/${problem.id}/submit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ language: selectedLanguage, code }),
+      });
+      const data = await res.json();
+      setSubmitResult({
+        status: data.verdict,
+        totalPassed: data.totalPassed,
+        totalCases: data.totalCases,
+        runtime: data.maxRuntimeMs != null ? `${data.maxRuntimeMs} ms` : "—",
+        memory: "—",
+        timestamp: new Date(data.timestamp).toLocaleTimeString(),
+        firstFailure: data.firstFailure,
+      });
+    } catch (err) {
+      setSubmitResult({ status: "Internal Error" });
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const getDifficultyBadge = (difficulty) => {
@@ -347,18 +382,32 @@ export default function QuestionPage() {
               <div className="space-y-4">
                 <h3 className="text-sm font-semibold text-slate-200">Past Submissions</h3>
                 {submitResult ? (
-                  <div className="p-3.5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 text-xs space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="font-bold text-emerald-400 flex items-center gap-1.5">
-                        <CheckCircle2 className="w-4 h-4" /> Accepted
-                      </span>
-                      <span className="text-slate-400">{submitResult.timestamp}</span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 pt-1 font-mono text-slate-300">
-                      <div>Runtime: {submitResult.runtime}</div>
-                      <div>Memory: {submitResult.memory}</div>
-                    </div>
-                  </div>
+                  (() => {
+                    const { isAccepted, Icon, badgeClasses, textClass } = getVerdictStyle(
+                      submitResult.status
+                    );
+                    return (
+                      <div className={`p-3.5 rounded-xl border text-xs space-y-2 ${badgeClasses}`}>
+                        <div className="flex items-center justify-between">
+                          <span className={`font-bold flex items-center gap-1.5 ${textClass}`}>
+                            <Icon className="w-4 h-4" /> {submitResult.status}
+                          </span>
+                          <span className="text-slate-400">{submitResult.timestamp}</span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 pt-1 font-mono text-slate-300">
+                          <div>
+                            Passed: {submitResult.totalPassed}/{submitResult.totalCases}
+                          </div>
+                          <div>Runtime: {submitResult.runtime}</div>
+                        </div>
+                        {!isAccepted && submitResult.firstFailure && (
+                          <div className="pt-1 text-slate-400">
+                            First failing case: #{submitResult.firstFailure.caseNum ?? "—"}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()
                 ) : (
                   <p className="text-xs text-slate-500 italic">
                     No submissions recorded yet for this question in this session. Submit your code to test!
@@ -468,14 +517,20 @@ export default function QuestionPage() {
                   <CheckCircle2 className="w-3.5 h-3.5" />
                   Execution Result
                   {(runResult || submitResult) && (
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full ${
+                        getVerdictStyle((submitResult || runResult).status).isAccepted
+                          ? "bg-emerald-400"
+                          : "bg-rose-400"
+                      }`}
+                    ></span>
                   )}
                 </button>
               </div>
 
               {/* Status hint */}
               <div className="text-[11px] text-slate-500 hidden sm:flex items-center gap-1">
-                <span>Backend evaluation integration placeholder</span>
+                <span>Connected to judge API</span>
               </div>
             </div>
 
@@ -559,65 +614,149 @@ export default function QuestionPage() {
                     </div>
                   ) : submitResult ? (
                     /* Submit Result Card */
-                    <div className="space-y-3">
-                      <div className="flex items-center gap-2 text-emerald-400 font-bold text-sm bg-emerald-500/10 border border-emerald-500/20 p-2.5 rounded-xl">
-                        <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                        <span>Accepted &bull; All {submitResult.totalPassed} Test Cases Passed</span>
-                      </div>
+                    (() => {
+                      const { isAccepted, Icon, badgeClasses, textClass } = getVerdictStyle(
+                        submitResult.status
+                      );
+                      return (
+                        <div className="space-y-3">
+                          <div
+                            className={`flex items-center gap-2 font-bold text-sm border p-2.5 rounded-xl ${badgeClasses}`}
+                          >
+                            <Icon className={`w-5 h-5 ${textClass}`} />
+                            <span>
+                              {submitResult.status}
+                              {submitResult.totalCases != null && (
+                                <>
+                                  {" "}
+                                  &bull; {submitResult.totalPassed}/{submitResult.totalCases} Test
+                                  Cases Passed
+                                </>
+                              )}
+                            </span>
+                          </div>
 
-                      <div className="grid grid-cols-2 gap-3 text-xs">
-                        <div className="bg-slate-900 border border-slate-800 p-3 rounded-xl flex items-center gap-2.5">
-                          <Clock className="w-4 h-4 text-emerald-400" />
-                          <div>
-                            <div className="text-slate-400">Runtime</div>
-                            <div className="font-mono font-bold text-white">
-                              {submitResult.runtime}{" "}
-                              <span className="text-[10px] text-emerald-400 font-normal">
-                                (Beats {submitResult.runtimePercentile})
-                              </span>
+                          <div className="grid grid-cols-2 gap-3 text-xs">
+                            <div className="bg-slate-900 border border-slate-800 p-3 rounded-xl flex items-center gap-2.5">
+                              <Clock className="w-4 h-4 text-emerald-400" />
+                              <div>
+                                <div className="text-slate-400">Runtime</div>
+                                <div className="font-mono font-bold text-white">
+                                  {submitResult.runtime}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="bg-slate-900 border border-slate-800 p-3 rounded-xl flex items-center gap-2.5">
+                              <Cpu className="w-4 h-4 text-cyan-400" />
+                              <div>
+                                <div className="text-slate-400">Memory</div>
+                                <div className="font-mono font-bold text-white">
+                                  {submitResult.memory}
+                                </div>
+                              </div>
                             </div>
                           </div>
-                        </div>
 
-                        <div className="bg-slate-900 border border-slate-800 p-3 rounded-xl flex items-center gap-2.5">
-                          <Cpu className="w-4 h-4 text-cyan-400" />
-                          <div>
-                            <div className="text-slate-400">Memory</div>
-                            <div className="font-mono font-bold text-white">
-                              {submitResult.memory}{" "}
-                              <span className="text-[10px] text-cyan-400 font-normal">
-                                (Beats {submitResult.memoryPercentile})
+                          {!isAccepted && submitResult.firstFailure && (
+                            <div className="space-y-2 text-xs">
+                              <span className="text-rose-400 font-semibold block">
+                                First failing case
+                                {submitResult.firstFailure.caseNum != null &&
+                                  ` (#${submitResult.firstFailure.caseNum})`}
+                                :
                               </span>
+                              {submitResult.firstFailure.input != null && (
+                                <div>
+                                  <span className="text-slate-400 block mb-1">Input:</span>
+                                  <div className="bg-[#090d16] border border-slate-800 rounded-lg p-2 font-mono text-slate-200 whitespace-pre-wrap">
+                                    {submitResult.firstFailure.input}
+                                  </div>
+                                </div>
+                              )}
+                              {submitResult.firstFailure.expectedOutput != null && (
+                                <div>
+                                  <span className="text-slate-400 block mb-1">Expected:</span>
+                                  <div className="bg-[#090d16] border border-slate-800 rounded-lg p-2 font-mono text-slate-300">
+                                    {submitResult.firstFailure.expectedOutput}
+                                  </div>
+                                </div>
+                              )}
+                              {submitResult.firstFailure.actualOutput != null && (
+                                <div>
+                                  <span className="text-slate-400 block mb-1">Your Output:</span>
+                                  <div className="bg-[#090d16] border border-rose-900/50 rounded-lg p-2 font-mono text-rose-300">
+                                    {submitResult.firstFailure.actualOutput}
+                                  </div>
+                                </div>
+                              )}
+                              {submitResult.firstFailure.stderr && (
+                                <div>
+                                  <span className="text-slate-400 block mb-1">Stderr:</span>
+                                  <div className="bg-[#090d16] border border-rose-900/50 rounded-lg p-2 font-mono text-rose-300 whitespace-pre-wrap">
+                                    {submitResult.firstFailure.stderr}
+                                  </div>
+                                </div>
+                              )}
                             </div>
-                          </div>
+                          )}
                         </div>
-                      </div>
-                    </div>
+                      );
+                    })()
                   ) : runResult ? (
                     /* Run Result Card */
-                    <div className="space-y-2.5 text-xs">
-                      <div className="flex items-center justify-between">
-                        <span className="font-bold text-emerald-400 flex items-center gap-1.5">
-                          <CheckCircle2 className="w-4 h-4" /> Run Succeeded
-                        </span>
-                        <span className="text-slate-400 font-mono">Runtime: {runResult.runtime}</span>
-                      </div>
+                    (() => {
+                      const { Icon, textClass } = getVerdictStyle(runResult.status);
+                      return (
+                        <div className="space-y-2.5 text-xs">
+                          <div className="flex items-center justify-between">
+                            <span className={`font-bold flex items-center gap-1.5 ${textClass}`}>
+                              <Icon className="w-4 h-4" /> {runResult.status}
+                            </span>
+                            <span className="text-slate-400 font-mono">
+                              Runtime: {runResult.runtime}
+                            </span>
+                          </div>
 
-                      <div className="space-y-2">
-                        <div>
-                          <span className="text-slate-400 block font-medium mb-1">Your Output:</span>
-                          <div className="bg-[#090d16] border border-slate-800 rounded-lg p-2 font-mono text-emerald-300">
-                            {runResult.actualOutput}
+                          <div className="space-y-2">
+                            <div>
+                              <span className="text-slate-400 block font-medium mb-1">
+                                Your Output:
+                              </span>
+                              <div
+                                className={`bg-[#090d16] border rounded-lg p-2 font-mono ${
+                                  runResult.status === "Accepted"
+                                    ? "border-slate-800 text-emerald-300"
+                                    : "border-rose-900/50 text-rose-300"
+                                }`}
+                              >
+                                {runResult.actualOutput}
+                              </div>
+                            </div>
+                            {runResult.expectedOutput != null && (
+                              <div>
+                                <span className="text-slate-400 block font-medium mb-1">
+                                  Expected:
+                                </span>
+                                <div className="bg-[#090d16] border border-slate-800 rounded-lg p-2 font-mono text-slate-300">
+                                  {runResult.expectedOutput}
+                                </div>
+                              </div>
+                            )}
+                            {runResult.stderr && (
+                              <div>
+                                <span className="text-slate-400 block font-medium mb-1">
+                                  Stderr:
+                                </span>
+                                <div className="bg-[#090d16] border border-rose-900/50 rounded-lg p-2 font-mono text-rose-300 whitespace-pre-wrap">
+                                  {runResult.stderr}
+                                </div>
+                              </div>
+                            )}
                           </div>
                         </div>
-                        <div>
-                          <span className="text-slate-400 block font-medium mb-1">Expected:</span>
-                          <div className="bg-[#090d16] border border-slate-800 rounded-lg p-2 font-mono text-slate-300">
-                            {runResult.expectedOutput}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
+                      );
+                    })()
                   ) : (
                     <div className="flex flex-col items-center justify-center py-6 text-slate-500 text-xs">
                       <Terminal className="w-6 h-6 mb-1.5 opacity-50" />

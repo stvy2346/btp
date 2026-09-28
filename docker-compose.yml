@@ -1,0 +1,51 @@
+version: "3.8"
+
+# Brings up two services:
+#   cpp-sandbox-api  - the judge's own Express API (from the uploaded zip),
+#                      given the docker CLI + host socket so it can spawn one
+#                      sandbox container per /execute call.
+#   backend          - this project: wraps student submissions in a
+#                      generated harness, calls cpp-sandbox-api, grades
+#                      the result, and serves the frontend.
+#
+# One-time prerequisite (not something compose can do on your behalf,
+# since it must land in the *host's* Docker image store, not this
+# compose project's): build the worker image the judge actually
+# executes submissions in:
+#
+#   docker build -t cpp-sandbox:latest ./cpp-sandbox-judge
+#
+# Then:
+#
+#   docker compose up --build
+#
+# Frontend (run separately, e.g. `npm run dev` in the frontend/ folder)
+# should point at http://localhost:4000 — see backend/README.md.
+
+services:
+  cpp-sandbox-api:
+    build:
+      context: ./cpp-sandbox-judge
+      dockerfile: api.Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - SANDBOX_IMAGE=cpp-sandbox:latest
+      - MAX_CONCURRENT_EXECUTIONS=4
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+    ports:
+      - "4000:4000"
+    environment:
+      - PORT=4000
+      - JUDGE_URL=http://cpp-sandbox-api:3000/execute
+      - CORS_ORIGIN=http://localhost:5173
+      - SUBMIT_CONCURRENCY=3
+    depends_on:
+      - cpp-sandbox-api
+    restart: unless-stopped

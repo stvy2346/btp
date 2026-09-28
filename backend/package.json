@@ -1,0 +1,20 @@
+{
+  "name": "btp-judge-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Backend layer between the LeetCode-style frontend and the cpp-sandbox judge: wraps submitted Solution code in a generated harness, sends it to the judge, and grades the result.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.4.0"
+  }
+}
